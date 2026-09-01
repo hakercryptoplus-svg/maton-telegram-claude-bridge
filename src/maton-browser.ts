@@ -59,18 +59,33 @@ export class MatonBrowser {
     const page = this.activePage;
     const composer = page.locator('textarea[placeholder="Ask Claude Code to perform a task..."]');
     await composer.waitFor({ state: 'visible', timeout: 30000 }).catch(() => { throw new Error('Task composer was not found after waiting 30 seconds'); });
+
+    const readConversation = async () => (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
+    const before = await readConversation();
     await composer.fill(message);
     await composer.press('Enter');
-    let previous = '';
+
+    let previous = before;
+    let stableTicks = 0;
+    let sawNewContent = false;
     for (let i = 0; i < 180; i++) {
       await page.waitForTimeout(1000);
-      const text = await page.locator('main').innerText().catch(() => page.locator('body').innerText());
-      const normalized = text.trim();
-      if (normalized && normalized !== previous) {
-        previous = normalized;
-        await onUpdate(normalized.slice(-3500));
+      const current = await readConversation();
+      if (!current || current === previous) {
+        if (sawNewContent) stableTicks++;
+        if (sawNewContent && stableTicks >= 5) break;
+        continue;
       }
-      if (/completed|failed|error/i.test(normalized) && i > 5) break;
+      stableTicks = 0;
+      const common = Math.min(previous.length, current.length);
+      let prefix = 0;
+      while (prefix < common && previous[prefix] === current[prefix]) prefix++;
+      const delta = current.slice(prefix).trim();
+      previous = current;
+      if (delta) {
+        sawNewContent = true;
+        await onUpdate(delta.slice(-3500));
+      }
     }
   }
 

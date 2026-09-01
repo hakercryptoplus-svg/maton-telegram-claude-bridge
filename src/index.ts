@@ -93,7 +93,6 @@ bot.on('text', async (ctx) => {
   const status = await ctx.reply('⏳ جاري إرسال الطلب إلى Claude Code...');
   try {
     await browser.sendTaskMessage(text, async (update) => streamReply(ctx.chat.id, status.message_id, update));
-    await ctx.reply('✅ انتهى التحديث.');
   } catch (e) { await streamReply(ctx.chat.id, status.message_id, `فشل الطلب: ${String(e)}`); }
   finally { busy = false; }
 });
