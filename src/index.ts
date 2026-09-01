@@ -84,6 +84,6 @@ bot.on('text', async (ctx) => {
 
 await browser.start();
 await bot.launch();
-console.log('Telegram/Maton bridge is running');
+console.log('Telegram/Maton bridge is running | build=08916de-login-selector-fix');
 process.once('SIGINT', () => { bot.stop('SIGINT'); void browser.close(); });
 process.once('SIGTERM', () => { bot.stop('SIGTERM'); void browser.close(); });
