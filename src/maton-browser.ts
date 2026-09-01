@@ -57,7 +57,7 @@ export class MatonBrowser {
 
   async sendTaskMessage(message: string, onUpdate: (text: string) => Promise<void>) {
     const page = this.activePage;
-    const composer = page.locator('textarea[placeholder="Ask Claude Code to perform a task..."]');
+    const composer = page.locator('textarea:visible, [contenteditable="true"]:visible').last();
     await composer.waitFor({ state: 'visible', timeout: 30000 }).catch(() => { throw new Error('Task composer was not found after waiting 30 seconds'); });
 
     const readConversation = async () => (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
