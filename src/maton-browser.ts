@@ -60,28 +60,48 @@ export class MatonBrowser {
     const composer = page.locator('textarea[placeholder="Ask Claude Code to perform a task..."]');
     await composer.waitFor({ state: 'visible', timeout: 30000 }).catch(() => { throw new Error('Task composer was not found after waiting 30 seconds'); });
 
-    const readConversation = async () => (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
-    const before = await readConversation();
+    const readNarrative = async () => page.locator('main').evaluate((main) => {
+      const copy = main.cloneNode(true) as HTMLElement;
+      copy.querySelectorAll('button').forEach((el) => el.remove());
+      return (copy.innerText || '').trim();
+    }).catch(() => '');
+    const toolButtons = () => page.locator('main button').filter({ hasText: /^(Terminal|Web Fetch|ToolSearch|Read|Write|Agent|Bash|Browser)/i });
+
+    const before = await readNarrative();
+    const baselineTools = await toolButtons().count();
     await composer.fill(message);
     await composer.press('Enter');
 
-    let previous = before;
+    let previousNarrative = before;
+    let handledTools = baselineTools;
     let stableTicks = 0;
     let sawNewContent = false;
     for (let i = 0; i < 180; i++) {
       await page.waitForTimeout(1000);
-      const current = await readConversation();
-      if (!current || current === previous) {
+      const buttons = toolButtons();
+      const toolCount = await buttons.count();
+      while (handledTools < toolCount) {
+        const button = buttons.nth(handledTools);
+        const label = (await button.innerText()).trim();
+        await button.click().catch(() => undefined);
+        const detail = (await button.locator('xpath=..').innerText().catch(() => label)).trim();
+        await onUpdate(`[${label.split('\\n')[0]}]\n${detail.slice(0, 2800)}`);
+        handledTools++;
+        sawNewContent = true;
+      }
+
+      const currentNarrative = await readNarrative();
+      if (!currentNarrative || currentNarrative === previousNarrative) {
         if (sawNewContent) stableTicks++;
         if (sawNewContent && stableTicks >= 5) break;
         continue;
       }
       stableTicks = 0;
-      const common = Math.min(previous.length, current.length);
+      const common = Math.min(previousNarrative.length, currentNarrative.length);
       let prefix = 0;
-      while (prefix < common && previous[prefix] === current[prefix]) prefix++;
-      const delta = current.slice(prefix).trim();
-      previous = current;
+      while (prefix < common && previousNarrative[prefix] === currentNarrative[prefix]) prefix++;
+      const delta = currentNarrative.slice(prefix).trim();
+      previousNarrative = currentNarrative;
       if (delta) {
         sawNewContent = true;
         await onUpdate(delta.slice(-3500));
