@@ -70,7 +70,9 @@ export class MatonBrowser {
     const before = await readNarrative();
     const baselineTools = await toolButtons().count();
     await composer.fill(message);
-    await composer.press('Enter');
+    const submit = page.locator('button[type="submit"]').last();
+    await submit.waitFor({ state: 'visible', timeout: 10000 });
+    await submit.click();
 
     let previousNarrative = before;
     let handledTools = baselineTools;
