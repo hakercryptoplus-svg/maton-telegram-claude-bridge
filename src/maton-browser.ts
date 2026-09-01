@@ -70,9 +70,11 @@ export class MatonBrowser {
     const before = await readNarrative();
     const baselineTools = await toolButtons().count();
     await composer.fill(message);
-    const submit = page.locator('button[type="submit"]').last();
-    await submit.waitFor({ state: 'visible', timeout: 10000 });
-    await submit.click();
+    const composerContainer = composer.locator('xpath=ancestor::div[.//button[@type="submit"]][1]');
+    const submit = composerContainer.locator('button[type="submit"]');
+    await submit.waitFor({ state: 'visible', timeout: 30000 });
+    await submit.scrollIntoViewIfNeeded();
+    await submit.click({ timeout: 10000 });
 
     let previousNarrative = before;
     let handledTools = baselineTools;
