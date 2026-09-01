@@ -3,6 +3,7 @@ import { chromium, BrowserContext, Page } from 'playwright';
 export class MatonBrowser {
   private context?: BrowserContext;
   private page?: Page;
+  private taskUrl?: string;
 
   constructor(private readonly dataDir: string) {}
 
@@ -51,14 +52,27 @@ export class MatonBrowser {
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.maton.ai' || !parsed.pathname.startsWith('/tasks/')) {
       throw new Error('Only https://www.maton.ai/tasks/... URLs are allowed');
     }
+    this.taskUrl = taskUrl;
     await this.activePage.goto(taskUrl, { waitUntil: 'domcontentloaded' });
     await this.activePage.waitForTimeout(1500);
   }
 
   async sendTaskMessage(message: string, onUpdate: (text: string) => Promise<void>) {
     const page = this.activePage;
-    const composer = page.locator('textarea:visible, [contenteditable="true"]:visible').last();
-    await composer.waitFor({ state: 'visible', timeout: 30000 }).catch(() => { throw new Error('Task composer was not found after waiting 30 seconds'); });
+    const composerSelector = 'textarea:visible, [contenteditable="true"]:visible';
+    let composer = page.locator(composerSelector).last();
+    try {
+      await composer.waitFor({ state: 'visible', timeout: 8000 });
+    } catch {
+      if (this.taskUrl) {
+        await page.goto(this.taskUrl, { waitUntil: 'domcontentloaded' });
+        await page.waitForTimeout(2500);
+      }
+      composer = page.locator(composerSelector).last();
+      await composer.waitFor({ state: 'visible', timeout: 45000 }).catch(() => {
+        throw new Error(`Task composer unavailable after reload (url=${page.url()})`);
+      });
+    }
 
     const readConversation = async () => (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
     const before = await readConversation();
