@@ -7,7 +7,11 @@ const allowedUserId = process.env.ALLOWED_TELEGRAM_USER_ID;
 const dataDir = process.env.BROWSER_DATA_DIR ?? '/data/browser';
 if (!token || !allowedUserId) throw new Error('TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_USER_ID are required');
 
-const bot = new Telegraf(token);
+const bot = new Telegraf(token, {
+  telegram: {
+    apiRoot: process.env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org',
+  },
+});
 const browser = new MatonBrowser(dataDir);
 let taskUrl: string | undefined;
 let busy = false;
@@ -83,7 +87,17 @@ bot.on('text', async (ctx) => {
 });
 
 await browser.start();
-await bot.launch();
-console.log('Telegram/Maton bridge is running | build=08916de-login-selector-fix');
+let launched = false;
+for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
+  try {
+    await bot.launch();
+    launched = true;
+  } catch (error) {
+    console.error(`Telegram startup attempt ${attempt}/5 failed:`, error);
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, attempt * 5000));
+  }
+}
+if (!launched) throw new Error('Telegram connection failed after 5 attempts');
+console.log('Telegram/Maton bridge is running | build=telegram-retry-composer-fix');
 process.once('SIGINT', () => { bot.stop('SIGINT'); void browser.close(); });
 process.once('SIGTERM', () => { bot.stop('SIGTERM'); void browser.close(); });
