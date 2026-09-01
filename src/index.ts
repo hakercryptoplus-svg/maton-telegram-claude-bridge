@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createServer } from 'node:http';
 import { Telegraf } from 'telegraf';
 import { MatonBrowser } from './maton-browser.js';
 
@@ -13,6 +14,17 @@ const bot = new Telegraf(token, {
   },
 });
 const browser = new MatonBrowser(dataDir);
+const port = Number(process.env.PORT ?? 10000);
+const httpServer = createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, service: 'maton-telegram-claude-bridge' }));
+    return;
+  }
+  res.writeHead(404);
+  res.end('Not found');
+});
+httpServer.listen(port, '0.0.0.0', () => console.log(`HTTP health server listening on ${port}`));
 let taskUrl: string | undefined;
 let busy = false;
 let mode: 'idle' | 'awaiting-email' | 'awaiting-confirmation' | 'awaiting-task' | 'ready' = 'idle';
@@ -98,6 +110,6 @@ for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
   }
 }
 if (!launched) throw new Error('Telegram connection failed after 5 attempts');
-console.log('Telegram/Maton bridge is running | build=telegram-retry-composer-fix');
-process.once('SIGINT', () => { bot.stop('SIGINT'); void browser.close(); });
-process.once('SIGTERM', () => { bot.stop('SIGTERM'); void browser.close(); });
+console.log('Telegram/Maton bridge is running | build=web-service-health-fix');
+process.once('SIGINT', () => { bot.stop('SIGINT'); httpServer.close(); void browser.close(); });
+process.once('SIGTERM', () => { bot.stop('SIGTERM'); httpServer.close(); void browser.close(); });
