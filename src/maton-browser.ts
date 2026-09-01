@@ -23,11 +23,13 @@ export class MatonBrowser {
 
   async openLogin() {
     await this.activePage.goto('https://www.maton.ai/login', { waitUntil: 'domcontentloaded' });
+    await this.activePage.getByRole('button', { name: 'Continue', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
   }
 
   async submitEmail(email: string) {
+    await this.activePage.locator('input[type="email"]').waitFor({ state: 'visible', timeout: 15000 });
     await this.activePage.locator('input[type="email"]').fill(email);
-    await this.activePage.getByRole('button', { name: /continue/i }).click();
+    await this.activePage.getByRole('button', { name: 'Continue', exact: true }).click();
     await this.activePage.waitForTimeout(1000);
   }
 
