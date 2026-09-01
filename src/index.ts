@@ -1,0 +1,89 @@
+import 'dotenv/config';
+import { Telegraf } from 'telegraf';
+import { MatonBrowser } from './maton-browser.js';
+
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const allowedUserId = process.env.ALLOWED_TELEGRAM_USER_ID;
+const dataDir = process.env.BROWSER_DATA_DIR ?? '/data/browser';
+if (!token || !allowedUserId) throw new Error('TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_USER_ID are required');
+
+const bot = new Telegraf(token);
+const browser = new MatonBrowser(dataDir);
+let taskUrl: string | undefined;
+let busy = false;
+let mode: 'idle' | 'awaiting-email' | 'awaiting-confirmation' | 'awaiting-task' | 'ready' = 'idle';
+let lastChatId: number | undefined;
+
+function authorized(ctx: any) {
+  return String(ctx.from?.id ?? '') === allowedUserId;
+}
+function deny(ctx: any) {
+  return ctx.reply('غير مصرح لهذا الحساب.');
+}
+function extractUrl(text: string) {
+  return text.match(/https?:\/\/[^\s]+/i)?.[0];
+}
+async function streamReply(chatId: number, messageId: number, text: string) {
+  const clipped = text.slice(-3900);
+  await bot.telegram.editMessageText(chatId, messageId, undefined, clipped).catch(() => undefined);
+}
+
+bot.start(async (ctx) => {
+  if (!authorized(ctx)) return deny(ctx);
+  lastChatId = ctx.chat.id;
+  mode = 'awaiting-email';
+  await ctx.reply('أرسل بريد Maton الإلكتروني. لن أستخدمه إلا لإكمال تسجيل الدخول.');
+});
+
+bot.on('text', async (ctx) => {
+  if (!authorized(ctx)) return deny(ctx);
+  const text = ctx.message.text.trim();
+  lastChatId = ctx.chat.id;
+  if (text === '/status') return ctx.reply(`الحالة: ${mode}${taskUrl ? `\nالمهمة: ${taskUrl}` : ''}`);
+  if (text === '/reset') {
+    mode = 'idle'; taskUrl = undefined; busy = false;
+    return ctx.reply('تمت إعادة ضبط الحالة. أرسل /start للبدء.');
+  }
+  if (busy) return ctx.reply('هناك طلب قيد التنفيذ، انتظر بث النتيجة.');
+
+  if (mode === 'awaiting-email') {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) return ctx.reply('أرسل بريدًا إلكترونيًا صالحًا.');
+    busy = true;
+    try { await browser.openLogin(); await browser.submitEmail(text); mode = 'awaiting-confirmation'; await ctx.reply('تم إرسال طلب الدخول. أرسل رابط التأكيد الذي وصلك في البريد.'); }
+    catch (e) { await ctx.reply(`فشل بدء الدخول: ${String(e)}`); }
+    finally { busy = false; }
+    return;
+  }
+  if (mode === 'awaiting-confirmation') {
+    const url = extractUrl(text);
+    if (!url) return ctx.reply('أرسل رابط التأكيد كاملًا.');
+    busy = true;
+    try { await browser.openConfirmationUrl(url); mode = 'awaiting-task'; await ctx.reply('تمت المصادقة. أرسل رابط المهمة من Maton.'); }
+    catch (e) { await ctx.reply(`رابط التأكيد غير مقبول: ${String(e)}`); }
+    finally { busy = false; }
+    return;
+  }
+  if (mode === 'awaiting-task') {
+    if (!/^https:\/\/www\.maton\.ai\/tasks\/[\w-]+$/i.test(text)) return ctx.reply('أرسل رابط مهمة Maton بصيغة https://www.maton.ai/tasks/...');
+    busy = true;
+    try { await browser.openTask(text); taskUrl = text; mode = 'ready'; await ctx.reply('تم فتح المهمة. أرسل رسالتك الآن إلى Claude Code.'); }
+    catch (e) { await ctx.reply(`تعذر فتح المهمة: ${String(e)}`); }
+    finally { busy = false; }
+    return;
+  }
+  if (mode !== 'ready') return ctx.reply('أرسل /start للبدء.');
+
+  busy = true;
+  const status = await ctx.reply('⏳ جاري إرسال الطلب إلى Claude Code...');
+  try {
+    await browser.sendTaskMessage(text, async (update) => streamReply(ctx.chat.id, status.message_id, update));
+    await ctx.reply('✅ انتهى التحديث.');
+  } catch (e) { await streamReply(ctx.chat.id, status.message_id, `فشل الطلب: ${String(e)}`); }
+  finally { busy = false; }
+});
+
+await browser.start();
+await bot.launch();
+console.log('Telegram/Maton bridge is running');
+process.once('SIGINT', () => { bot.stop('SIGINT'); void browser.close(); });
+process.once('SIGTERM', () => { bot.stop('SIGTERM'); void browser.close(); });

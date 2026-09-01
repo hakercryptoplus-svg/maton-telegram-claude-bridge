@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: maton-telegram-claude-bridge
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    disk:
+      name: browser-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_TELEGRAM_USER_ID
+        sync: false
+      - key: BROWSER_DATA_DIR
+        value: /data/browser
