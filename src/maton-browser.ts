@@ -52,7 +52,7 @@ export class MatonBrowser {
       throw new Error('Only https://www.maton.ai/tasks/... URLs are allowed');
     }
     await this.activePage.goto(taskUrl, { waitUntil: 'domcontentloaded' });
-    await this.activePage.locator('textarea[placeholder="Ask Claude Code to perform a task..."]').waitFor({ state: 'visible', timeout: 30000 });
+    await this.activePage.waitForTimeout(1500);
   }
 
   async sendTaskMessage(message: string, onUpdate: (text: string) => Promise<void>) {
