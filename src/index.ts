@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { Telegraf } from 'telegraf';
 import { MatonBrowser } from './maton-browser.js';
@@ -6,6 +7,7 @@ import { MatonBrowser } from './maton-browser.js';
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const allowedUserId = process.env.ALLOWED_TELEGRAM_USER_ID;
 const dataDir = process.env.BROWSER_DATA_DIR ?? '/data/browser';
+const stateFile = `${dataDir}/bridge-state.json`;
 if (!token || !allowedUserId) throw new Error('TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_USER_ID are required');
 
 const bot = new Telegraf(token, {
@@ -30,6 +32,22 @@ let busy = false;
 let mode: 'idle' | 'awaiting-email' | 'awaiting-confirmation' | 'awaiting-task' | 'ready' = 'idle';
 let lastChatId: number | undefined;
 
+async function saveState() {
+  await mkdir(dataDir, { recursive: true });
+  const tmp = `${stateFile}.tmp`;
+  await writeFile(tmp, JSON.stringify({ taskUrl, mode, lastChatId }, null, 2), { mode: 0o600 });
+  await rename(tmp, stateFile);
+}
+
+async function loadState() {
+  try {
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { taskUrl?: string; mode?: string; lastChatId?: number };
+    if (saved.taskUrl) taskUrl = saved.taskUrl;
+    if (['idle', 'awaiting-email', 'awaiting-confirmation', 'awaiting-task', 'ready'].includes(saved.mode ?? '')) mode = saved.mode as typeof mode;
+    if (saved.lastChatId) lastChatId = saved.lastChatId;
+  } catch { /* first boot: no saved state */ }
+}
+
 function authorized(ctx: any) {
   return String(ctx.from?.id ?? '') === allowedUserId;
 }
@@ -47,7 +65,10 @@ async function streamReply(chatId: number, messageId: number, text: string) {
 bot.start(async (ctx) => {
   if (!authorized(ctx)) return deny(ctx);
   lastChatId = ctx.chat.id;
+  if (mode === 'ready' && taskUrl) return ctx.reply('الجلسة والمهمة محفوظتان. أرسل رسالتك مباشرة، أو أرسل /reset لإعادة الضبط.');
+  if (mode === 'awaiting-task') return ctx.reply('المصادقة محفوظة. أرسل رابط المهمة من Maton.');
   mode = 'awaiting-email';
+  await saveState();
   await ctx.reply('أرسل بريد Maton الإلكتروني. لن أستخدمه إلا لإكمال تسجيل الدخول.');
 });
 
@@ -58,6 +79,7 @@ bot.on('text', async (ctx) => {
   if (text === '/status') return ctx.reply(`الحالة: ${mode}${taskUrl ? `\nالمهمة: ${taskUrl}` : ''}`);
   if (text === '/reset') {
     mode = 'idle'; taskUrl = undefined; busy = false;
+    await saveState();
     return ctx.reply('تمت إعادة ضبط الحالة. أرسل /start للبدء.');
   }
   if (busy) return ctx.reply('هناك طلب قيد التنفيذ، انتظر بث النتيجة.');
@@ -68,6 +90,7 @@ bot.on('text', async (ctx) => {
     try { await browser.openLogin(); await browser.submitEmail(text); mode = 'awaiting-confirmation'; await ctx.reply('تم إرسال طلب الدخول. أرسل رابط التأكيد الذي وصلك في البريد.'); }
     catch (e) { await ctx.reply(`فشل بدء الدخول: ${String(e)}`); }
     finally { busy = false; }
+    await saveState();
     return;
   }
   if (mode === 'awaiting-confirmation') {
@@ -77,12 +100,13 @@ bot.on('text', async (ctx) => {
     try { await browser.openConfirmationUrl(url); mode = 'awaiting-task'; await ctx.reply('تمت المصادقة. أرسل رابط المهمة من Maton.'); }
     catch (e) { await ctx.reply(`رابط التأكيد غير مقبول: ${String(e)}`); }
     finally { busy = false; }
+    await saveState();
     return;
   }
   if (mode === 'awaiting-task') {
     if (!/^https:\/\/www\.maton\.ai\/tasks\/[\w-]+$/i.test(text)) return ctx.reply('أرسل رابط مهمة Maton بصيغة https://www.maton.ai/tasks/...');
     busy = true;
-    try { await browser.openTask(text); taskUrl = text; mode = 'ready'; await ctx.reply('تم فتح المهمة. أرسل رسالتك الآن إلى Claude Code.'); }
+    try { await browser.openTask(text); taskUrl = text; mode = 'ready'; await saveState(); await ctx.reply('تم فتح المهمة. أرسل رسالتك الآن إلى Claude Code.'); }
     catch (e) { await ctx.reply(`تعذر فتح المهمة: ${String(e)}`); }
     finally { busy = false; }
     return;
@@ -97,7 +121,12 @@ bot.on('text', async (ctx) => {
   finally { busy = false; }
 });
 
+await loadState();
 await browser.start();
+if (taskUrl && String(mode) === 'ready') {
+  try { await browser.openTask(taskUrl); console.log('Restored Maton task session'); }
+  catch (error) { console.error('Could not restore Maton task on startup:', error); }
+}
 let launched = false;
 for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
   try {
