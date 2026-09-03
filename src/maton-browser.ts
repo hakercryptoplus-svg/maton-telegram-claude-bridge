@@ -81,27 +81,19 @@ export class MatonBrowser {
 
   private async findComposer(): Promise<ReturnType<Page['locator']>> {
     const page = this.activePage;
-    // Try specific Maton selectors first, then fall back to generic
-    const selectors = [
+    // Combined selector — Playwright evaluates all at once and .last() picks the
+    // bottom-most visible match, which is typically the active input on the page.
+    const combined = [
       '[data-testid="task-composer"] textarea',
       '[data-testid="message-input"]',
-      'form textarea:visible',
-      'textarea[placeholder]:visible',
-      '[contenteditable="true"][role="textbox"]:visible',
-      'textarea:visible',
-    ];
-    for (const sel of selectors) {
-      const loc = page.locator(sel).last();
-      if ((await loc.count()) > 0) {
-        try {
-          await loc.waitFor({ state: 'visible', timeout: 2000 });
-          return loc;
-        } catch {
-          // try next
-        }
-      }
-    }
-    throw new Error('No composer found on page');
+      'form textarea',
+      'textarea[placeholder]',
+      '[contenteditable="true"][role="textbox"]',
+      'textarea',
+    ].join(', ');
+    const composer = page.locator(combined).last();
+    await composer.waitFor({ state: 'visible', timeout: 15_000 });
+    return composer;
   }
 
   async sendTaskMessage(message: string, onUpdate: UpdateCallback): Promise<void> {
