@@ -78,7 +78,9 @@ function extractUrl(text: string): string | undefined {
 }
 
 async function streamReply(chatId: number, messageId: number, text: string, done = false): Promise<void> {
-  const formatted = formatStreamChunk(text.slice(-3500), done);
+  // Limit to 4000 chars (Telegram's limit is 4096 for HTML)
+  const trimmed = text.length > 3800 ? '...\n\n' + text.slice(-3800) : text;
+  const formatted = formatStreamChunk(trimmed, done);
   await bot.telegram.editMessageText(chatId, messageId, undefined, formatted, { parse_mode: 'HTML' }).catch(() => undefined);
 }
 
@@ -124,7 +126,7 @@ bot.on('text', async (ctx) => {
   }
 
   if (busy) {
-    return ctx.reply('⏳ <b>هناك طلب قيد التنفيذ،</b> انتظر اكتمال الرد الحالي.', { parse_mode: 'HTML' });
+    return ctx.reply('⏳ يُرجى الانتظار، هناك طلب قيد المعالجة...', { parse_mode: 'HTML' });
   }
 
   // ── State machine ───────────────────────────────────────────────────────────
@@ -201,16 +203,18 @@ bot.on('text', async (ctx) => {
 
   // ── Send message to Claude ──────────────────────────────────────────────────
   busy = true;
-  const status = await ctx.reply('🤔 <b>جاري إرسال الطلب إلى Claude Code...</b>', { parse_mode: 'HTML' });
+  const status = await ctx.reply('⏳ <b>Claude Code</b>', { parse_mode: 'HTML' });
   try {
-    await browser.sendTaskMessage(text, async (update) => {
-      await streamReply(ctx.chat.id, status.message_id, update, false);
+    let accumulated = '';
+    await browser.sendTaskMessage(text, async (chunk) => {
+      accumulated += chunk;
+      await streamReply(ctx.chat.id, status.message_id, accumulated, false);
     });
-    // Final update — mark as done
-    await streamReply(ctx.chat.id, status.message_id, '', true).catch(() => undefined);
+    // Final update — just change icon to done
+    await streamReply(ctx.chat.id, status.message_id, accumulated, true).catch(() => undefined);
   } catch (e) {
     logger.error('Failed to send task message', { error: String(e) });
-    await streamReply(ctx.chat.id, status.message_id, `فشل الطلب: ${String(e)}`, true);
+    await ctx.reply(`❌ فشل: ${String(e)}`, { parse_mode: 'HTML' });
   } finally {
     busy = false;
   }

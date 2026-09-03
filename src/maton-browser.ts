@@ -111,10 +111,29 @@ export class MatonBrowser {
       composer = await this.findComposer();
     }
 
-    const readPage = async () =>
-      (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
+    // Read conversation area only (more reliable than full page)
+    const readConversation = async () => {
+      try {
+        // Try multiple selectors for the conversation/chat area
+        const selectors = [
+          '[data-testid="conversation"]',
+          '[data-testid="messages"]',
+          'main [role="log"]',
+          'main',
+        ];
+        for (const selector of selectors) {
+          const el = page.locator(selector).first();
+          if ((await el.count()) > 0) {
+            return (await el.innerText()).trim();
+          }
+        }
+        return (await page.locator('body').innerText()).trim();
+      } catch {
+        return '';
+      }
+    };
 
-    const beforeText = await readPage();
+    const beforeText = await readConversation();
     await composer.fill(message);
     await composer.press('Enter');
     logger.info('Message sent, polling for response');
@@ -126,12 +145,12 @@ export class MatonBrowser {
 
     for (let i = 0; i < MAX_TICKS; i++) {
       await page.waitForTimeout(1000);
-      const current = await readPage();
+      const current = await readConversation();
 
       if (!current || current === previous) {
         if (sawNewContent) {
           stableTicks++;
-          if (stableTicks >= 5) {
+          if (stableTicks >= 4) {
             logger.info('Response stabilized, done polling');
             break;
           }
@@ -147,8 +166,8 @@ export class MatonBrowser {
 
       if (newContent) {
         sawNewContent = true;
-        logger.debug('New content received', { length: newContent.length });
-        await onUpdate(newContent.slice(-3500));
+        logger.debug('New content chunk', { length: newContent.length });
+        await onUpdate(newContent);
       }
     }
 
@@ -165,15 +184,34 @@ export class MatonBrowser {
 
 /**
  * Extract new content appended to `current` compared to `previous`.
- * Uses longest common prefix to find where divergence starts.
+ * Uses suffix matching to find only what was genuinely added.
  */
 function extractNewContent(previous: string, current: string): string {
   if (current.length <= previous.length) return '';
-  // Fast path: if current starts with previous, new content is just the suffix
-  if (current.startsWith(previous)) return current.slice(previous.length).trim();
-  // Otherwise find common prefix length
-  const minLen = Math.min(previous.length, current.length);
-  let i = 0;
-  while (i < minLen && previous[i] === current[i]) i++;
-  return current.slice(i).trim();
+
+  // Fast path: if current starts with previous exactly, return the suffix
+  if (current.startsWith(previous)) {
+    return current.slice(previous.length).trim();
+  }
+
+  // Otherwise try to find longest common suffix of previous that's a prefix of current
+  // This handles cases where timestamps or UI elements changed in the middle
+  const maxCheck = Math.min(previous.length, 500); // Check last 500 chars of previous
+  for (let len = maxCheck; len > 50; len--) {
+    const suffix = previous.slice(-len);
+    const idx = current.indexOf(suffix);
+    if (idx !== -1) {
+      // Found common part, return everything after it
+      const newPart = current.slice(idx + len).trim();
+      if (newPart) return newPart;
+    }
+  }
+
+  // Fallback: if nothing matches well, assume it's all new (but skip duplicating previous)
+  // This handles edge cases where the page structure changed significantly
+  if (current.length > previous.length * 1.5) {
+    return current.slice(previous.length).trim();
+  }
+
+  return '';
 }

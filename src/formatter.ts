@@ -10,22 +10,27 @@ export function esc(text: string): string {
 
 /** Format a status update from Claude with nice HTML layout */
 export function formatClaudeUpdate(text: string): string {
-  const lines = text.split('\n');
-  const formatted = lines.map((line) => {
-    // Code blocks
-    if (line.startsWith('    ') || line.startsWith('\t')) {
-      return `<code>${esc(line.trimStart())}</code>`;
-    }
-    // Headers (##, ###)
-    if (/^#{1,3}\s/.test(line)) {
-      const content = line.replace(/^#+\s/, '');
-      return `<b>${esc(content)}</b>`;
-    }
-    // Bold (**text**)
-    const withBold = esc(line).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-    return withBold;
-  });
-  return formatted.join('\n').trim();
+  let formatted = text;
+
+  // Escape HTML first
+  formatted = esc(formatted);
+
+  // Format code blocks (4 spaces or tab indented)
+  formatted = formatted.replace(/^(    |\t)(.+)$/gm, '<code>$2</code>');
+
+  // Format headers (## or ###)
+  formatted = formatted.replace(/^#{1,3}\s+(.+)$/gm, '<b>$1</b>');
+
+  // Format bold (**text**)
+  formatted = formatted.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+
+  // Format italic (*text*)
+  formatted = formatted.replace(/\*([^*\n]+)\*/g, '<i>$1</i>');
+
+  // Format inline code (`code`)
+  formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  return formatted.trim();
 }
 
 /** Progress message while waiting for Claude */
@@ -46,7 +51,9 @@ export function formatFinalResponse(text: string): string {
 /** Format a streamed chunk (partial response) */
 export function formatStreamChunk(text: string, done = false): string {
   const icon = done ? '✅' : '⏳';
-  return `${icon} <b>Claude Code:</b>\n\n${formatClaudeUpdate(text)}`;
+  const content = text.trim();
+  if (!content) return `${icon} <b>Claude Code</b>`;
+  return `${icon} <b>Claude Code</b>\n\n${formatClaudeUpdate(content)}`;
 }
 
 /** Format error message */
