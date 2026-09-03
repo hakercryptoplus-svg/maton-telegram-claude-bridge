@@ -3,6 +3,16 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { Telegraf } from 'telegraf';
 import { MatonBrowser } from './maton-browser.js';
+import { logger } from './logger.js';
+import {
+  alreadyConnectedMessage,
+  formatError,
+  formatStatus,
+  formatStreamChunk,
+  helpMessage,
+  welcomeMessage,
+} from './formatter.js';
+import type { BridgeMode, BridgeState } from './types.js';
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const allowedUserId = process.env.ALLOWED_TELEGRAM_USER_ID;
@@ -11,12 +21,12 @@ const stateFile = `${dataDir}/bridge-state.json`;
 if (!token || !allowedUserId) throw new Error('TELEGRAM_BOT_TOKEN and ALLOWED_TELEGRAM_USER_ID are required');
 
 const bot = new Telegraf(token, {
-  telegram: {
-    apiRoot: process.env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org',
-  },
+  telegram: { apiRoot: process.env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org' },
 });
 const browser = new MatonBrowser(dataDir);
 const port = Number(process.env.PORT ?? 10000);
+
+// ── HTTP health server ────────────────────────────────────────────────────────
 const httpServer = createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -26,118 +36,211 @@ const httpServer = createServer((req, res) => {
   res.writeHead(404);
   res.end('Not found');
 });
-httpServer.listen(port, '0.0.0.0', () => console.log(`HTTP health server listening on ${port}`));
-let taskUrl: string | undefined;
-let busy = false;
-let mode: 'idle' | 'awaiting-email' | 'awaiting-confirmation' | 'awaiting-task' | 'ready' = 'idle';
-let lastChatId: number | undefined;
+httpServer.listen(port, '0.0.0.0', () => logger.info(`Health server listening on port ${port}`));
 
-async function saveState() {
+// ── State ─────────────────────────────────────────────────────────────────────
+let state: BridgeState = { mode: 'idle' };
+let busy = false;
+
+async function saveState(): Promise<void> {
   await mkdir(dataDir, { recursive: true });
   const tmp = `${stateFile}.tmp`;
-  await writeFile(tmp, JSON.stringify({ taskUrl, mode, lastChatId }, null, 2), { mode: 0o600 });
+  await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await rename(tmp, stateFile);
 }
 
-async function loadState() {
+async function loadState(): Promise<void> {
   try {
-    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { taskUrl?: string; mode?: string; lastChatId?: number };
-    if (saved.taskUrl) taskUrl = saved.taskUrl;
-    if (['idle', 'awaiting-email', 'awaiting-confirmation', 'awaiting-task', 'ready'].includes(saved.mode ?? '')) mode = saved.mode as typeof mode;
-    if (saved.lastChatId) lastChatId = saved.lastChatId;
-  } catch { /* first boot: no saved state */ }
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as Partial<BridgeState>;
+    const validModes: BridgeMode[] = ['idle', 'awaiting-email', 'awaiting-confirmation', 'awaiting-task', 'ready'];
+    state = {
+      taskUrl: saved.taskUrl,
+      mode: validModes.includes(saved.mode as BridgeMode) ? (saved.mode as BridgeMode) : 'idle',
+      lastChatId: saved.lastChatId,
+    };
+    logger.info('State loaded', { mode: state.mode, hasTask: !!state.taskUrl });
+  } catch {
+    logger.info('No saved state, starting fresh');
+  }
 }
 
-function authorized(ctx: any) {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function authorized(ctx: any): boolean {
   return String(ctx.from?.id ?? '') === allowedUserId;
 }
+
 function deny(ctx: any) {
-  return ctx.reply('غير مصرح لهذا الحساب.');
-}
-function extractUrl(text: string) {
-  return text.match(/https?:\/\/[^\s]+/i)?.[0];
-}
-async function streamReply(chatId: number, messageId: number, text: string) {
-  const clipped = text.slice(-3900);
-  await bot.telegram.editMessageText(chatId, messageId, undefined, clipped).catch(() => undefined);
+  return ctx.reply('⛔ غير مصرح لهذا الحساب.', { parse_mode: 'HTML' });
 }
 
+function extractUrl(text: string): string | undefined {
+  return text.match(/https?:\/\/[^\s]+/i)?.[0];
+}
+
+async function streamReply(chatId: number, messageId: number, text: string, done = false): Promise<void> {
+  const formatted = formatStreamChunk(text.slice(-3500), done);
+  await bot.telegram.editMessageText(chatId, messageId, undefined, formatted, { parse_mode: 'HTML' }).catch(() => undefined);
+}
+
+// ── Commands ──────────────────────────────────────────────────────────────────
 bot.start(async (ctx) => {
   if (!authorized(ctx)) return deny(ctx);
-  lastChatId = ctx.chat.id;
-  if (mode === 'ready' && taskUrl) return ctx.reply('الجلسة والمهمة محفوظتان. أرسل رسالتك مباشرة، أو أرسل /reset لإعادة الضبط.');
-  if (mode === 'awaiting-task') return ctx.reply('المصادقة محفوظة. أرسل رابط المهمة من Maton.');
-  mode = 'awaiting-email';
+  state.lastChatId = ctx.chat.id;
+
+  if (state.mode === 'ready' && state.taskUrl) {
+    return ctx.reply(alreadyConnectedMessage(state.taskUrl), { parse_mode: 'HTML' });
+  }
+  if (state.mode === 'awaiting-task') {
+    return ctx.reply('✅ <b>المصادقة محفوظة.</b> أرسل رابط المهمة من Maton.', { parse_mode: 'HTML' });
+  }
+
+  state.mode = 'awaiting-email';
   await saveState();
-  await ctx.reply('أرسل بريد Maton الإلكتروني. لن أستخدمه إلا لإكمال تسجيل الدخول.');
+  return ctx.reply(welcomeMessage(), { parse_mode: 'HTML' });
+});
+
+bot.help(async (ctx) => {
+  if (!authorized(ctx)) return deny(ctx);
+  return ctx.reply(helpMessage(), { parse_mode: 'HTML' });
 });
 
 bot.on('text', async (ctx) => {
   if (!authorized(ctx)) return deny(ctx);
   const text = ctx.message.text.trim();
-  lastChatId = ctx.chat.id;
-  if (text === '/status') return ctx.reply(`الحالة: ${mode}${taskUrl ? `\nالمهمة: ${taskUrl}` : ''}`);
+  state.lastChatId = ctx.chat.id;
+
+  // ── Built-in commands ───────────────────────────────────────────────────────
+  if (text === '/status') {
+    return ctx.reply(formatStatus(state.mode, state.taskUrl), { parse_mode: 'HTML' });
+  }
+  if (text === '/help') {
+    return ctx.reply(helpMessage(), { parse_mode: 'HTML' });
+  }
   if (text === '/reset') {
-    mode = 'idle'; taskUrl = undefined; busy = false;
+    state = { mode: 'idle', lastChatId: ctx.chat.id };
+    busy = false;
     await saveState();
-    return ctx.reply('تمت إعادة ضبط الحالة. أرسل /start للبدء.');
+    return ctx.reply('🔄 <b>تمت إعادة ضبط الجلسة.</b> أرسل /start للبدء.', { parse_mode: 'HTML' });
   }
-  if (busy) return ctx.reply('هناك طلب قيد التنفيذ، انتظر بث النتيجة.');
 
-  if (mode === 'awaiting-email') {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) return ctx.reply('أرسل بريدًا إلكترونيًا صالحًا.');
+  if (busy) {
+    return ctx.reply('⏳ <b>هناك طلب قيد التنفيذ،</b> انتظر اكتمال الرد الحالي.', { parse_mode: 'HTML' });
+  }
+
+  // ── State machine ───────────────────────────────────────────────────────────
+  if (state.mode === 'awaiting-email') {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+      return ctx.reply('📧 أرسل بريدًا إلكترونيًا صالحًا.', { parse_mode: 'HTML' });
+    }
     busy = true;
-    try { await browser.openLogin(); await browser.submitEmail(text); mode = 'awaiting-confirmation'; await ctx.reply('تم إرسال طلب الدخول. أرسل رابط التأكيد الذي وصلك في البريد.'); }
-    catch (e) { await ctx.reply(`فشل بدء الدخول: ${String(e)}`); }
-    finally { busy = false; }
+    try {
+      await browser.openLogin();
+      await browser.submitEmail(text);
+      state.mode = 'awaiting-confirmation';
+      await ctx.reply(
+        '📨 <b>تم إرسال رابط الدخول!</b>\n\nافتح بريدك وأرسل رابط التأكيد هنا.',
+        { parse_mode: 'HTML' },
+      );
+    } catch (e) {
+      await ctx.reply(formatError(`فشل بدء الدخول: ${String(e)}`), { parse_mode: 'HTML' });
+    } finally {
+      busy = false;
+    }
     await saveState();
     return;
   }
-  if (mode === 'awaiting-confirmation') {
+
+  if (state.mode === 'awaiting-confirmation') {
     const url = extractUrl(text);
-    if (!url) return ctx.reply('أرسل رابط التأكيد كاملًا.');
+    if (!url) return ctx.reply('🔗 أرسل رابط التأكيد كاملًا.', { parse_mode: 'HTML' });
     busy = true;
-    try { await browser.openConfirmationUrl(url); mode = 'awaiting-task'; await ctx.reply('تمت المصادقة. أرسل رابط المهمة من Maton.'); }
-    catch (e) { await ctx.reply(`رابط التأكيد غير مقبول: ${String(e)}`); }
-    finally { busy = false; }
+    try {
+      await browser.openConfirmationUrl(url);
+      state.mode = 'awaiting-task';
+      await ctx.reply(
+        '✅ <b>تمت المصادقة بنجاح!</b>\n\nأرسل رابط المهمة من Maton\n<code>https://www.maton.ai/tasks/...</code>',
+        { parse_mode: 'HTML' },
+      );
+    } catch (e) {
+      await ctx.reply(formatError(`رابط التأكيد غير مقبول: ${String(e)}`), { parse_mode: 'HTML' });
+    } finally {
+      busy = false;
+    }
     await saveState();
     return;
   }
-  if (mode === 'awaiting-task') {
-    if (!/^https:\/\/www\.maton\.ai\/tasks\/[\w-]+$/i.test(text)) return ctx.reply('أرسل رابط مهمة Maton بصيغة https://www.maton.ai/tasks/...');
+
+  if (state.mode === 'awaiting-task') {
+    if (!/^https:\/\/www\.maton\.ai\/tasks\/[\w-]+$/i.test(text)) {
+      return ctx.reply(
+        '🔗 أرسل رابط مهمة Maton بصيغة:\n<code>https://www.maton.ai/tasks/...</code>',
+        { parse_mode: 'HTML' },
+      );
+    }
     busy = true;
-    try { await browser.openTask(text); taskUrl = text; mode = 'ready'; await saveState(); await ctx.reply('تم فتح المهمة. أرسل رسالتك الآن إلى Claude Code.'); }
-    catch (e) { await ctx.reply(`تعذر فتح المهمة: ${String(e)}`); }
-    finally { busy = false; }
+    try {
+      await browser.openTask(text);
+      state.taskUrl = text;
+      state.mode = 'ready';
+      await saveState();
+      await ctx.reply(
+        '🚀 <b>تم فتح المهمة!</b>\n\nأرسل رسالتك الآن إلى Claude Code.',
+        { parse_mode: 'HTML' },
+      );
+    } catch (e) {
+      await ctx.reply(formatError(`تعذر فتح المهمة: ${String(e)}`), { parse_mode: 'HTML' });
+    } finally {
+      busy = false;
+    }
     return;
   }
-  if (mode !== 'ready') return ctx.reply('أرسل /start للبدء.');
 
+  if (state.mode !== 'ready') {
+    return ctx.reply('💡 أرسل /start للبدء.', { parse_mode: 'HTML' });
+  }
+
+  // ── Send message to Claude ──────────────────────────────────────────────────
   busy = true;
-  const status = await ctx.reply('⏳ جاري إرسال الطلب إلى Claude Code...');
+  const status = await ctx.reply('🤔 <b>جاري إرسال الطلب إلى Claude Code...</b>', { parse_mode: 'HTML' });
   try {
-    await browser.sendTaskMessage(text, async (update) => streamReply(ctx.chat.id, status.message_id, update));
-  } catch (e) { await streamReply(ctx.chat.id, status.message_id, `فشل الطلب: ${String(e)}`); }
-  finally { busy = false; }
+    await browser.sendTaskMessage(text, async (update) => {
+      await streamReply(ctx.chat.id, status.message_id, update, false);
+    });
+    // Final update — mark as done
+    await streamReply(ctx.chat.id, status.message_id, '', true).catch(() => undefined);
+  } catch (e) {
+    logger.error('Failed to send task message', { error: String(e) });
+    await streamReply(ctx.chat.id, status.message_id, `فشل الطلب: ${String(e)}`, true);
+  } finally {
+    busy = false;
+  }
 });
 
+// ── Startup ───────────────────────────────────────────────────────────────────
 await loadState();
 await browser.start();
-if (taskUrl && String(mode) === 'ready') {
-  try { await browser.openTask(taskUrl); console.log('Restored Maton task session'); }
-  catch (error) { console.error('Could not restore Maton task on startup:', error); }
+
+if (state.taskUrl && state.mode === 'ready') {
+  try {
+    await browser.openTask(state.taskUrl);
+    logger.info('Restored Maton task session');
+  } catch (error) {
+    logger.error('Could not restore Maton task on startup', { error: String(error) });
+  }
 }
+
 let launched = false;
 for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
   try {
     await bot.launch();
     launched = true;
   } catch (error) {
-    console.error(`Telegram startup attempt ${attempt}/5 failed:`, error);
+    logger.error(`Telegram startup attempt ${attempt}/5 failed`, { error: String(error) });
     if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, attempt * 5000));
   }
 }
 if (!launched) throw new Error('Telegram connection failed after 5 attempts');
-console.log('Telegram/Maton bridge is running | build=web-service-health-fix');
+logger.info('Maton Telegram bridge is running');
+
 process.once('SIGINT', () => { bot.stop('SIGINT'); httpServer.close(); void browser.close(); });
 process.once('SIGTERM', () => { bot.stop('SIGTERM'); httpServer.close(); void browser.close(); });

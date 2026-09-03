@@ -1,20 +1,46 @@
-FROM node:22-bookworm
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM node:22-bookworm-slim AS builder
+
+WORKDIR /build
+COPY package*.json ./
+RUN npm ci --include=dev
+
+COPY tsconfig.json ./
+COPY src ./src
+RUN npm run build
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     BROWSER_DATA_DIR=/data/browser
 
+# Install Playwright + Chromium system deps
+RUN npm install -g playwright@1.52.0 && \
+    npx playwright install --with-deps chromium && \
+    npm uninstall -g playwright
+
 WORKDIR /app
+
+# Copy production deps
 COPY package*.json ./
-RUN npm install --include=dev
-RUN npx playwright install --with-deps chromium
+RUN npm ci --omit=dev
 
-COPY tsconfig.json ./
-COPY src ./src
-RUN npm run build
-RUN npm prune --omit=dev
+# Copy compiled output
+COPY --from=builder /build/dist ./dist
 
+# Persistent browser data directory
 RUN mkdir -p /data/browser
+
+# Non-root user for security
+RUN useradd -r -u 1001 -g root appuser && \
+    chown -R appuser:root /data /app
+USER appuser
+
 VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://localhost:' + (process.env.PORT || 10000) + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 CMD ["node", "dist/index.js"]

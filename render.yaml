@@ -1,18 +1,33 @@
 services:
   - type: web
     name: maton-telegram-claude-bridge
-    healthCheckPath: /health
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
+    healthCheckPath: /health
+
+    # Persistent disk for browser session (login survives restarts)
     disk:
       name: browser-data
       mountPath: /data
       sizeGB: 1
+
+    # Auto-deploy on push to main
+    autoDeploy: true
+
     envVars:
+      # Required: get from @BotFather on Telegram
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+
+      # Required: your Telegram user ID (use @userinfobot to find it)
       - key: ALLOWED_TELEGRAM_USER_ID
         sync: false
+
+      # Optional: override browser data directory
       - key: BROWSER_DATA_DIR
         value: /data/browser
+
+      # Optional: log level (debug | info | warn | error)
+      - key: LOG_LEVEL
+        value: info

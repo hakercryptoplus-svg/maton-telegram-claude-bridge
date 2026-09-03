@@ -1,29 +1,76 @@
 # Maton Telegram Claude Bridge
 
-بوت Telegram خاص يفتح جلسة Chromium محفوظة، يمرّر خطوات تسجيل Maton، ثم يفتح مهمة Maton مرتبطة بـ Claude Code ويرسل الرسائل إليها ويعرض التحديثات تدريجيًا في Telegram.
+A Telegram bot that bridges your chat with [Maton](https://maton.ai) Tasks (Claude Code). Send messages to your AI agent directly from Telegram and receive live updates.
 
-## الأمان
+## How It Works
 
-هذا المشروع لا يضع أي رمز Telegram أو Maton داخل Git. احصر الوصول عبر `ALLOWED_TELEGRAM_USER_ID`، واستخدم Render Environment Variables. لا ترسل مفاتيح API أو روابط التأكيد إلى السجلات. رابط التأكيد حساس وقابل للاستخدام مرة واحدة.
-
-## المتغيرات المطلوبة
-
-```text
-TELEGRAM_BOT_TOKEN=...
-ALLOWED_TELEGRAM_USER_ID=123456789
-BROWSER_DATA_DIR=/data/browser
+```
+Telegram ──► Bot ──► Playwright (Chromium) ──► Maton Tasks ──► Claude Code
 ```
 
-## النشر على Render
+The bot maintains a persistent browser session logged into Maton, allowing it to send messages to your task and stream the responses back to you on Telegram.
 
-أنشئ Web Service من هذا المستودع واختر Docker، أو استخدم ملف `render.yaml` عبر Blueprint. أضف قرصًا دائمًا بحجم 1GB على المسار `/data` حتى تبقى جلسة Chromium محفوظة بعد إعادة التشغيل. أضف `TELEGRAM_BOT_TOKEN` و`ALLOWED_TELEGRAM_USER_ID` من لوحة Render، ولا تضعهما في المستودع.
+## Features
 
-## الاستخدام
+- Single-user access control (your Telegram ID only)
+- Persistent login — survives service restarts
+- Live response streaming as Claude types
+- One-click deploy to [Render](https://render.com)
+- Docker-ready with multi-stage build
 
-أرسل `/start`، ثم البريد، ثم رابط التأكيد الذي يصلك بالبريد، ثم رابط المهمة بصيغة `https://www.maton.ai/tasks/<uuid>`. بعد ظهور رسالة الجاهزية، كل رسالة نصية جديدة تُرسل إلى مربع مهمة Claude Code، ويجري تحديث رسالة Telegram أثناء تغيّر سجل المهمة.
+## Quick Deploy to Render
 
-الأوامر المتاحة هي `/status` لمعرفة الحالة و`/reset` لإعادة التدفق من البداية.
+1. Fork this repo
+2. Go to [Render](https://render.com) → New → Blueprint
+3. Connect your fork
+4. Set the required environment variables (see below)
+5. Deploy!
 
-## ملاحظات مهمة
+## Environment Variables
 
-التدفق يعتمد على واجهة Maton المرئية، لأن Maton لا يوثق API عامة لإرسال رسائل إلى مهمة Claude Code الموجودة. إذا تغيّر تصميم الموقع فقد تحتاج محددات Playwright في `src/maton-browser.ts` إلى تحديث. كما أن Render Worker يحتاج خطة تدعم القرص الدائم؛ تخزين المتصفح دون قرص دائم سيؤدي إلى إعادة تسجيل الدخول بعد كل إعادة تشغيل.
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from [@BotFather](https://t.me/BotFather) |
+| `ALLOWED_TELEGRAM_USER_ID` | Yes | Your Telegram user ID (get from [@userinfobot](https://t.me/userinfobot)) |
+| `BROWSER_DATA_DIR` | — | Browser profile path (default: `/data/browser`) |
+| `LOG_LEVEL` | — | Logging level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `PORT` | — | HTTP port for health check (default: `10000`) |
+
+## Bot Commands
+
+| Command | Description |
+|---|---|
+| `/start` | Begin setup or show current status |
+| `/status` | Show connection status |
+| `/reset` | Reset session and start over |
+| `/help` | Show help and available commands |
+
+## Setup Flow
+
+1. Send `/start` to the bot
+2. Enter your Maton email address
+3. Check your email and paste the magic link
+4. Paste your Maton task URL (`https://www.maton.ai/tasks/...`)
+5. Start chatting with Claude Code!
+
+## Local Development
+
+```bash
+cp .env.example .env
+# Fill in your values
+
+npm install
+npx playwright install chromium
+npm run dev
+```
+
+## Architecture Notes
+
+- **Browser automation**: Uses Playwright to control a headless Chromium instance
+- **Session persistence**: Browser profile stored on a mounted disk (`/data`)
+- **Security**: Access restricted to one Telegram user ID; credentials never stored in Git
+- **Limitation**: Relies on Maton's UI selectors — may need updates if Maton redesigns its frontend
+
+## License
+
+MIT

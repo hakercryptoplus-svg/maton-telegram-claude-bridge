@@ -1,4 +1,15 @@
 import { chromium, BrowserContext, Page } from 'playwright';
+import { logger } from './logger.js';
+import type { UpdateCallback } from './types.js';
+
+const MATON_ORIGINS = new Set(['https://www.maton.ai', 'https://maton.ai']);
+const CONFIRM_ORIGINS = new Set(['https://www.maton.ai', 'https://maton.ai']);
+// AWS tracking links redirect back to maton
+const CONFIRM_HOSTNAME_SUFFIX = '.awstrack.me';
+
+function isSafeMaton(hostname: string): boolean {
+  return MATON_ORIGINS.has(`https://${hostname}`) || hostname.endsWith(CONFIRM_HOSTNAME_SUFFIX);
+}
 
 export class MatonBrowser {
   private context?: BrowserContext;
@@ -7,14 +18,16 @@ export class MatonBrowser {
 
   constructor(private readonly dataDir: string) {}
 
-  async start() {
+  async start(): Promise<void> {
+    logger.info('Starting browser', { dataDir: this.dataDir });
     this.context = await chromium.launchPersistentContext(this.dataDir, {
       headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-setuid-sandbox'],
       viewport: { width: 1280, height: 900 },
     });
-    this.page = this.context.pages()[0] ?? await this.context.newPage();
+    this.page = this.context.pages()[0] ?? (await this.context.newPage());
     await this.page.goto('https://www.maton.ai/', { waitUntil: 'domcontentloaded' });
+    logger.info('Browser started');
   }
 
   private get activePage(): Page {
@@ -22,88 +35,153 @@ export class MatonBrowser {
     return this.page;
   }
 
-  async openLogin() {
+  async openLogin(): Promise<void> {
+    logger.info('Opening login page');
     await this.activePage.goto('https://www.maton.ai/login', { waitUntil: 'domcontentloaded' });
-    await this.activePage.getByRole('button', { name: 'Continue', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    await this.activePage.getByRole('button', { name: 'Continue', exact: true }).waitFor({
+      state: 'visible',
+      timeout: 15_000,
+    });
   }
 
-  async submitEmail(email: string) {
-    await this.activePage.locator('input[type="email"]').waitFor({ state: 'visible', timeout: 15000 });
-    await this.activePage.locator('input[type="email"]').fill(email);
+  async submitEmail(email: string): Promise<void> {
+    logger.info('Submitting email');
+    const input = this.activePage.locator('input[type="email"]');
+    await input.waitFor({ state: 'visible', timeout: 15_000 });
+    await input.fill(email);
     await this.activePage.getByRole('button', { name: 'Continue', exact: true }).click();
+    // Wait for form submission
     await this.activePage.waitForTimeout(1000);
   }
 
-  async openConfirmationUrl(url: string) {
+  async openConfirmationUrl(url: string): Promise<void> {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.maton.ai' && parsed.hostname !== 'maton.ai' && !parsed.hostname.endsWith('.awstrack.me')) {
+    if (parsed.protocol !== 'https:' || !isSafeMaton(parsed.hostname)) {
       throw new Error('Only Maton confirmation links are allowed');
     }
+    logger.info('Opening confirmation URL', { host: parsed.hostname });
     await this.activePage.goto(url, { waitUntil: 'domcontentloaded' });
-    const continueButton = this.activePage.getByRole('link', { name: /continue to sign in/i });
-    if (await continueButton.count()) {
-      await continueButton.click();
+    const continueBtn = this.activePage.getByRole('link', { name: /continue to sign in/i });
+    if ((await continueBtn.count()) > 0) {
+      await continueBtn.click();
     }
     await this.activePage.waitForTimeout(1500);
   }
 
-  async openTask(taskUrl: string) {
+  async openTask(taskUrl: string): Promise<void> {
     const parsed = new URL(taskUrl);
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.maton.ai' || !parsed.pathname.startsWith('/tasks/')) {
       throw new Error('Only https://www.maton.ai/tasks/... URLs are allowed');
     }
+    logger.info('Opening task', { taskUrl });
     this.taskUrl = taskUrl;
     await this.activePage.goto(taskUrl, { waitUntil: 'domcontentloaded' });
     await this.activePage.waitForTimeout(1500);
   }
 
-  async sendTaskMessage(message: string, onUpdate: (text: string) => Promise<void>) {
+  private async findComposer(): Promise<ReturnType<Page['locator']>> {
     const page = this.activePage;
-    const composerSelector = 'textarea:visible, [contenteditable="true"]:visible';
-    let composer = page.locator(composerSelector).last();
+    // Try specific Maton selectors first, then fall back to generic
+    const selectors = [
+      '[data-testid="task-composer"] textarea',
+      '[data-testid="message-input"]',
+      'form textarea:visible',
+      'textarea[placeholder]:visible',
+      '[contenteditable="true"][role="textbox"]:visible',
+      'textarea:visible',
+    ];
+    for (const sel of selectors) {
+      const loc = page.locator(sel).last();
+      if ((await loc.count()) > 0) {
+        try {
+          await loc.waitFor({ state: 'visible', timeout: 2000 });
+          return loc;
+        } catch {
+          // try next
+        }
+      }
+    }
+    throw new Error('No composer found on page');
+  }
+
+  async sendTaskMessage(message: string, onUpdate: UpdateCallback): Promise<void> {
+    const page = this.activePage;
+
+    let composer: ReturnType<Page['locator']>;
     try {
-      await composer.waitFor({ state: 'visible', timeout: 8000 });
+      composer = await this.findComposer();
     } catch {
+      logger.warn('Composer not found, reloading task page');
       if (this.taskUrl) {
         await page.goto(this.taskUrl, { waitUntil: 'domcontentloaded' });
         await page.waitForTimeout(2500);
       }
-      composer = page.locator(composerSelector).last();
-      await composer.waitFor({ state: 'visible', timeout: 45000 }).catch(() => {
-        throw new Error(`Task composer unavailable after reload (url=${page.url()})`);
-      });
+      composer = await this.findComposer();
     }
 
-    const readConversation = async () => (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
-    const before = await readConversation();
+    const readPage = async () =>
+      (await page.locator('main').innerText().catch(() => page.locator('body').innerText())).trim();
+
+    const beforeText = await readPage();
     await composer.fill(message);
     await composer.press('Enter');
+    logger.info('Message sent, polling for response');
 
-    let previous = before;
+    let previous = beforeText;
     let stableTicks = 0;
     let sawNewContent = false;
-    for (let i = 0; i < 180; i++) {
+    const MAX_TICKS = 180; // 3 minutes max
+
+    for (let i = 0; i < MAX_TICKS; i++) {
       await page.waitForTimeout(1000);
-      const current = await readConversation();
+      const current = await readPage();
+
       if (!current || current === previous) {
-        if (sawNewContent) stableTicks++;
-        if (sawNewContent && stableTicks >= 5) break;
+        if (sawNewContent) {
+          stableTicks++;
+          if (stableTicks >= 5) {
+            logger.info('Response stabilized, done polling');
+            break;
+          }
+        }
         continue;
       }
+
       stableTicks = 0;
-      const common = Math.min(previous.length, current.length);
-      let prefix = 0;
-      while (prefix < common && previous[prefix] === current[prefix]) prefix++;
-      const delta = current.slice(prefix).trim();
+
+      // Extract only the new content added since last tick
+      const newContent = extractNewContent(previous, current);
       previous = current;
-      if (delta) {
+
+      if (newContent) {
         sawNewContent = true;
-        await onUpdate(delta.slice(-3500));
+        logger.debug('New content received', { length: newContent.length });
+        await onUpdate(newContent.slice(-3500));
       }
+    }
+
+    if (!sawNewContent) {
+      logger.warn('No new content detected after sending message');
     }
   }
 
-  async close() {
+  async close(): Promise<void> {
+    logger.info('Closing browser');
     await this.context?.close();
   }
+}
+
+/**
+ * Extract new content appended to `current` compared to `previous`.
+ * Uses longest common prefix to find where divergence starts.
+ */
+function extractNewContent(previous: string, current: string): string {
+  if (current.length <= previous.length) return '';
+  // Fast path: if current starts with previous, new content is just the suffix
+  if (current.startsWith(previous)) return current.slice(previous.length).trim();
+  // Otherwise find common prefix length
+  const minLen = Math.min(previous.length, current.length);
+  let i = 0;
+  while (i < minLen && previous[i] === current[i]) i++;
+  return current.slice(i).trim();
 }
