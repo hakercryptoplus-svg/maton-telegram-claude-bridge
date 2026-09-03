@@ -111,31 +111,50 @@ export class MatonBrowser {
       composer = await this.findComposer();
     }
 
-    // Read conversation area - use body for maximum reliability
-    const readConversation = async () => {
+    // Read the assistant's last message directly
+    const readLastAssistantMessage = async () => {
       try {
-        return (await page.locator('body').innerText()).trim();
+        // Try multiple selectors to find Claude's response
+        const selectors = [
+          '[data-role="assistant"]:last-of-type',
+          '[data-sender="assistant"]:last-of-type',
+          '.message.assistant:last-of-type',
+          '[class*="assistant"]:last-of-type',
+          'main > div:last-of-type',
+        ];
+
+        for (const selector of selectors) {
+          const el = page.locator(selector);
+          if ((await el.count()) > 0) {
+            const text = await el.innerText();
+            if (text.trim()) return text.trim();
+          }
+        }
+
+        // Fallback: read main content area
+        const main = await page.locator('main').innerText().catch(() => '');
+        return main.trim();
       } catch (e) {
-        logger.error('Failed to read page content', { error: String(e) });
+        logger.error('Failed to read assistant message', { error: String(e) });
         return '';
       }
     };
 
-    const beforeText = await readConversation();
-    logger.info('Message sent, polling for response', { beforeLength: beforeText.length });
+    logger.info('Sending message and polling for response');
     await composer.fill(message);
     await composer.press('Enter');
+    await page.waitForTimeout(2000); // Wait for message to be sent
 
-    let previous = beforeText;
+    let previousResponse = '';
     let stableTicks = 0;
     let sawNewContent = false;
     const MAX_TICKS = 180; // 3 minutes max
 
     for (let i = 0; i < MAX_TICKS; i++) {
       await page.waitForTimeout(1000);
-      const current = await readConversation();
+      const currentResponse = await readLastAssistantMessage();
 
-      if (!current || current === previous) {
+      if (!currentResponse || currentResponse === previousResponse) {
         if (sawNewContent) {
           stableTicks++;
           if (stableTicks >= 4) {
@@ -147,26 +166,15 @@ export class MatonBrowser {
       }
 
       stableTicks = 0;
+      previousResponse = currentResponse;
+      sawNewContent = true;
 
-      // Extract response (everything after the original content)
-      const response = extractNewContent(beforeText, current);
-      previous = current;
-
-      if (response) {
-        sawNewContent = true;
-        logger.info('Response update', { responseLength: response.length, preview: response.slice(0, 100) });
-        await onUpdate(response);
-      } else {
-        logger.warn('Content changed but failed to extract new content', {
-          beforeLength: beforeText.length,
-          currentLength: current.length,
-          startsWithBefore: current.startsWith(beforeText.slice(0, 100)),
-        });
-      }
+      logger.info('Response update', { length: currentResponse.length, preview: currentResponse.slice(0, 100) });
+      await onUpdate(currentResponse);
     }
 
     if (!sawNewContent) {
-      logger.warn('No new content detected after sending message');
+      logger.warn('No response detected after sending message');
     }
   }
 
