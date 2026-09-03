@@ -205,13 +205,13 @@ bot.on('text', async (ctx) => {
   busy = true;
   const status = await ctx.reply('⏳ <b>Claude Code</b>', { parse_mode: 'HTML' });
   try {
-    let accumulated = '';
-    await browser.sendTaskMessage(text, async (chunk) => {
-      accumulated += chunk;
-      await streamReply(ctx.chat.id, status.message_id, accumulated, false);
+    let latestResponse = '';
+    await browser.sendTaskMessage(text, async (response) => {
+      latestResponse = response;
+      await streamReply(ctx.chat.id, status.message_id, response, false);
     });
     // Final update — just change icon to done
-    await streamReply(ctx.chat.id, status.message_id, accumulated, true).catch(() => undefined);
+    await streamReply(ctx.chat.id, status.message_id, latestResponse, true).catch(() => undefined);
   } catch (e) {
     logger.error('Failed to send task message', { error: String(e) });
     await ctx.reply(`❌ فشل: ${String(e)}`, { parse_mode: 'HTML' });

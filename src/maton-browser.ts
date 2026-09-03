@@ -111,32 +111,20 @@ export class MatonBrowser {
       composer = await this.findComposer();
     }
 
-    // Read conversation area only (more reliable than full page)
+    // Read conversation area - use body for maximum reliability
     const readConversation = async () => {
       try {
-        // Try multiple selectors for the conversation/chat area
-        const selectors = [
-          '[data-testid="conversation"]',
-          '[data-testid="messages"]',
-          'main [role="log"]',
-          'main',
-        ];
-        for (const selector of selectors) {
-          const el = page.locator(selector).first();
-          if ((await el.count()) > 0) {
-            return (await el.innerText()).trim();
-          }
-        }
         return (await page.locator('body').innerText()).trim();
-      } catch {
+      } catch (e) {
+        logger.error('Failed to read page content', { error: String(e) });
         return '';
       }
     };
 
     const beforeText = await readConversation();
+    logger.info('Message sent, polling for response', { beforeLength: beforeText.length });
     await composer.fill(message);
     await composer.press('Enter');
-    logger.info('Message sent, polling for response');
 
     let previous = beforeText;
     let stableTicks = 0;
@@ -160,14 +148,20 @@ export class MatonBrowser {
 
       stableTicks = 0;
 
-      // Extract only the new content added since last tick
-      const newContent = extractNewContent(previous, current);
+      // Extract response (everything after the original content)
+      const response = extractNewContent(beforeText, current);
       previous = current;
 
-      if (newContent) {
+      if (response) {
         sawNewContent = true;
-        logger.debug('New content chunk', { length: newContent.length });
-        await onUpdate(newContent);
+        logger.info('Response update', { responseLength: response.length, preview: response.slice(0, 100) });
+        await onUpdate(response);
+      } else {
+        logger.warn('Content changed but failed to extract new content', {
+          beforeLength: beforeText.length,
+          currentLength: current.length,
+          startsWithBefore: current.startsWith(beforeText.slice(0, 100)),
+        });
       }
     }
 
@@ -184,7 +178,7 @@ export class MatonBrowser {
 
 /**
  * Extract new content appended to `current` compared to `previous`.
- * Uses suffix matching to find only what was genuinely added.
+ * Tries multiple strategies to find what was genuinely added.
  */
 function extractNewContent(previous: string, current: string): string {
   if (current.length <= previous.length) return '';
@@ -194,23 +188,33 @@ function extractNewContent(previous: string, current: string): string {
     return current.slice(previous.length).trim();
   }
 
-  // Otherwise try to find longest common suffix of previous that's a prefix of current
-  // This handles cases where timestamps or UI elements changed in the middle
-  const maxCheck = Math.min(previous.length, 500); // Check last 500 chars of previous
-  for (let len = maxCheck; len > 50; len--) {
-    const suffix = previous.slice(-len);
-    const idx = current.indexOf(suffix);
-    if (idx !== -1) {
-      // Found common part, return everything after it
-      const newPart = current.slice(idx + len).trim();
-      if (newPart) return newPart;
+  // Try to find where previous ends in current
+  // Check last 1000 chars of previous to find a match
+  const searchLength = Math.min(previous.length, 1000);
+  const searchText = previous.slice(-searchLength);
+
+  const idx = current.indexOf(searchText);
+  if (idx !== -1) {
+    const newContent = current.slice(idx + searchLength).trim();
+    if (newContent) return newContent;
+  }
+
+  // Fallback: try with smaller chunks
+  for (let len of [500, 300, 150, 80]) {
+    if (previous.length < len) continue;
+    const chunk = previous.slice(-len);
+    const pos = current.indexOf(chunk);
+    if (pos !== -1) {
+      const newContent = current.slice(pos + len).trim();
+      if (newContent && newContent.length > 10) return newContent;
     }
   }
 
-  // Fallback: if nothing matches well, assume it's all new (but skip duplicating previous)
-  // This handles edge cases where the page structure changed significantly
-  if (current.length > previous.length * 1.5) {
-    return current.slice(previous.length).trim();
+  // Last resort: if current is significantly longer, assume most of it is new
+  if (current.length > previous.length * 1.3) {
+    // Take everything after a reasonable overlap estimate
+    const overlap = Math.floor(previous.length * 0.7);
+    return current.slice(overlap).trim();
   }
 
   return '';
