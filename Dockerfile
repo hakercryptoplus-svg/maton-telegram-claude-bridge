@@ -16,16 +16,14 @@ ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     BROWSER_DATA_DIR=/data/browser
 
-# Install Playwright + Chromium system deps
-RUN npm install -g playwright@1.52.0 && \
-    npx playwright install --with-deps chromium && \
-    npm uninstall -g playwright
-
 WORKDIR /app
 
-# Copy production deps
+# Copy production deps and install (includes playwright)
 COPY package*.json ./
 RUN npm ci --omit=dev
+
+# Install Chromium using the exact playwright version from package.json
+RUN npx playwright install --with-deps chromium
 
 # Copy compiled output
 COPY --from=builder /build/dist ./dist
@@ -35,7 +33,7 @@ RUN mkdir -p /data/browser
 
 # Non-root user for security
 RUN useradd -r -u 1001 -g root appuser && \
-    chown -R appuser:root /data /app
+    chown -R appuser:root /data /app /ms-playwright
 USER appuser
 
 VOLUME ["/data"]
