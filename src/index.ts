@@ -107,6 +107,7 @@ bot.help(async (ctx) => {
 });
 
 bot.on('text', async (ctx) => {
+  console.log(`Telegram update received: chat=${ctx.chat.id} from=${ctx.from?.id ?? 'unknown'}`);
   if (!authorized(ctx)) return deny(ctx);
   const text = ctx.message.text.trim();
   state.lastChatId = ctx.chat.id;
@@ -221,6 +222,9 @@ bot.on('text', async (ctx) => {
 });
 
 // ── Startup ───────────────────────────────────────────────────────────────────
+bot.catch((error, ctx) => {
+  console.error('Telegram update handler failed:', error, { updateType: ctx.updateType });
+});
 await loadState();
 await browser.start();
 
@@ -236,7 +240,9 @@ if (state.taskUrl && state.mode === 'ready') {
 let launched = false;
 for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
   try {
-    await bot.launch();
+    // Render runs one long-lived process; remove any stale webhook so polling receives updates.
+    await bot.telegram.deleteWebhook({ drop_pending_updates: false });
+    await bot.launch({ dropPendingUpdates: false });
     launched = true;
   } catch (error) {
     logger.error(`Telegram startup attempt ${attempt}/5 failed`, { error: String(error) });
@@ -244,7 +250,7 @@ for (let attempt = 1; attempt <= 5 && !launched; attempt++) {
   }
 }
 if (!launched) throw new Error('Telegram connection failed after 5 attempts');
-logger.info('Maton Telegram bridge is running');
-
+logger.info('Maton Telegram bridge is running | build=telegram-polling-webhook-fix');
+console.log('Telegram polling is active; send /status to verify message delivery.');
 process.once('SIGINT', () => { bot.stop('SIGINT'); httpServer.close(); void browser.close(); });
 process.once('SIGTERM', () => { bot.stop('SIGTERM'); httpServer.close(); void browser.close(); });
